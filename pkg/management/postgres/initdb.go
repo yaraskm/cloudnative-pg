@@ -23,7 +23,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io/fs"
+	"os"
 	"os/exec"
+	"os/user"
 	"path"
 	"path/filepath"
 	"sort"
@@ -156,7 +159,7 @@ func (info InitInfo) CreateDataDirectory() error {
 	// permission bits on the PGDATA
 	_ = compatibility.Umask(0o077)
 
-	initdbCmd := exec.Command(constants.InitdbName, options...) // #nosec
+	initdbCmd := createCommandWithNssWrapper(options)
 	err := execlog.RunBuffering(initdbCmd, constants.InitdbName)
 	if err != nil {
 		return fmt.Errorf("error while creating the PostgreSQL instance: %w", err)
@@ -429,6 +432,78 @@ func (info InitInfo) Bootstrap(ctx context.Context) error {
 	return nil
 }
 
+// createCommandWithNssWrapper will build an exec.Cmd that is wrapped in nss_wrapper if using a custom UID/GID
+func createCommandWithNssWrapper(options []string) *exec.Cmd {
+
+	cmd := exec.Command(constants.InitdbName, options...) // #nosec
+
+	// Get info for the currently running user.
+	_, err := user.Current()
+	if err != nil {
+		// Did not find the current user in /etc/passwd or primary group in /etc/group, so we need to fake it
+		log.Trace("failed to get info about current User",
+			"err", err,
+		)
+		log.Info("Current user ID / group ID does not exist in base image, attempting to fake it with nss_wrapper")
+
+		// Determine if libnss_wrapper is currently installed
+		matches := []string{}
+		err := filepath.WalkDir("/usr/lib", func(path string, elem fs.DirEntry, err error) error {
+			if !elem.IsDir() {
+				// We're looking at an actual file
+				elemInfo, err := elem.Info()
+				if err != nil {
+					log.Error(err, "failed to get file info")
+					return err
+				}
+
+				if filepath.Base(elemInfo.Name()) == "libnss_wrapper.so" {
+					matches = append(matches, path)
+					// Use the first instance found
+					return fs.SkipAll
+				}
+			}
+
+			return nil
+		})
+		if err != nil {
+			log.Warning("libnss_wrapper was not found, so we can't fake /etc/passwd for the specified UID/GID. The UID set for `postgres` must exist in the base image, or initDB will fail.")
+		} else {
+
+			user_file, err := os.CreateTemp("", "nss_wrapper_passwd")
+			if err != nil {
+				log.Error(err, "failed to create tempfile")
+				return cmd
+			}
+
+			_, err = user_file.WriteString(fmt.Sprintf("postgres:x:%d:%d::/var/lib/postgresql:/bin/bash\n", os.Getuid(), os.Getgid()))
+			if err != nil {
+				log.Error(err, "failed to write to %s", user_file.Name())
+				return cmd
+			}
+
+			group_file, err := os.CreateTemp("", "nss_wrapper_group")
+			if err != nil {
+				log.Error(err, "failed to create tempfile")
+				return cmd
+			}
+
+			_, err = group_file.WriteString(fmt.Sprintf("postgres:x:%d:\n", os.Getgid()))
+			if err != nil {
+				log.Error(err, "failed to write to %s", group_file.Name())
+				return cmd
+			}
+
+			// Use the first location that libnss_wrapper.so was found in
+			cmd.Env = append(cmd.Env, fmt.Sprintf("LD_PRELOAD=%s", matches[0]))
+			cmd.Env = append(cmd.Env, fmt.Sprintf("NSS_WRAPPER_PASSWD=%s", user_file.Name()))
+			cmd.Env = append(cmd.Env, fmt.Sprintf("NSS_WRAPPER_GROUP=%s", group_file.Name()))
+		}
+	}
+
+	return cmd
+}
+
 func executeLogicalImport(
 	ctx context.Context,
 	client ctrl.Client,
@@ -493,7 +568,7 @@ func (info InitInfo) initdbSyncOnly(ctx context.Context) error {
 		"--sync-only",
 	}
 	contextLogger.Info("Running initdb --sync-only", "pgdata", info.PgData)
-	initdbCmd := exec.Command(constants.InitdbName, options...) // #nosec
+	initdbCmd := createCommandWithNssWrapper(options)
 	if err := execlog.RunBuffering(initdbCmd, constants.InitdbName); err != nil {
 		return fmt.Errorf("error while running initdb --sync-only: %w", err)
 	}

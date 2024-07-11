@@ -20,6 +20,7 @@ with the following requirements:
     - `barman-cloud-wal-restore`
 - PGAudit extension installed (optional - only if PGAudit is required
   in the deployed clusters)
+- `libnss_wrapper` (used if present to set custom `postgres` User ID and Group ID at runtime)
 - Appropriate locale settings
 
 !!! Important
