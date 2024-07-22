@@ -32,6 +32,7 @@ COMMIT := $(shell git rev-parse --short HEAD || echo unknown)
 DATE := $(shell git log -1 --pretty=format:'%ad' --date short)
 VERSION := $(shell git describe --tags --match 'v*' | sed -e 's/^v//; s/-g[0-9a-f]\+$$//; s/-\([0-9]\+\)$$/-dev\1/')
 REPLACE_VERSION := $(shell git describe --tags --abbrev=0 $(shell git describe --tags --match 'v*' --abbrev=0)^)
+TAGS_PRESENT := $(shell git tag --list 'v*' | xargs)
 LDFLAGS= "-X github.com/cloudnative-pg/cloudnative-pg/pkg/versions.buildVersion=${VERSION} $\
 -X github.com/cloudnative-pg/cloudnative-pg/pkg/versions.buildCommit=${COMMIT} $\
 -X github.com/cloudnative-pg/cloudnative-pg/pkg/versions.buildDate=${DATE}"
@@ -126,7 +127,7 @@ run: generate fmt vet manifests ## Run against the configured Kubernetes cluster
 
 docker-build: go-releaser ## Build the docker image.
 	GOOS=linux GOARCH=${ARCH} GOPATH=$(go env GOPATH) DATE=${DATE} COMMIT=${COMMIT} VERSION=${VERSION} \
-	  $(GO_RELEASER) build --skip=validate --clean --single-target $(if $(VERSION),,--snapshot)
+	  $(GO_RELEASER) build --skip=validate --clean --single-target $(if $(TAGS_PRESENT),,--snapshot)
 	DOCKER_BUILDKIT=1 docker build . -t ${CONTROLLER_IMG} --build-arg VERSION=${VERSION}
 
 docker-push: ## Push the docker image.
