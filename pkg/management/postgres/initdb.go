@@ -137,6 +137,7 @@ func (info InitInfo) CreateDataDirectory() error {
 		"postgres",
 		"-D",
 		info.PgData,
+		"--debug",
 	}
 
 	// If temporary instance disable fsync on creation
@@ -159,7 +160,7 @@ func (info InitInfo) CreateDataDirectory() error {
 	// permission bits on the PGDATA
 	_ = compatibility.Umask(0o077)
 
-	initdbCmd := createCommandWithNssWrapper(options)
+	initdbCmd := info.createCommandWithNssWrapper(options)
 	err := execlog.RunBuffering(initdbCmd, constants.InitdbName)
 	if err != nil {
 		return fmt.Errorf("error while creating the PostgreSQL instance: %w", err)
@@ -433,7 +434,7 @@ func (info InitInfo) Bootstrap(ctx context.Context) error {
 }
 
 // createCommandWithNssWrapper will build an exec.Cmd that is wrapped in nss_wrapper if using a custom UID/GID
-func createCommandWithNssWrapper(options []string) *exec.Cmd {
+func (info InitInfo) createCommandWithNssWrapper(options []string) *exec.Cmd {
 
 	cmd := exec.Command(constants.InitdbName, options...) // #nosec
 
@@ -470,29 +471,35 @@ func createCommandWithNssWrapper(options []string) *exec.Cmd {
 			log.Warning("libnss_wrapper was not found, so we can't fake /etc/passwd for the specified UID/GID. The UID set for `postgres` must exist in the base image, or initDB will fail.")
 		} else {
 
-			user_file, err := os.CreateTemp("", "nss_wrapper_passwd")
+			user_file, err := os.CreateTemp("/run", "nss_wrapper_passwd")
 			if err != nil {
 				log.Error(err, "failed to create tempfile")
 				return cmd
 			}
 
-			_, err = user_file.WriteString(fmt.Sprintf("postgres:x:%d:%d::/var/lib/postgresql:/bin/bash\n", os.Getuid(), os.Getgid()))
+			user := fmt.Sprintf("postgres:x:%d:%d:PostgreSQL:%s:/bin/false\n", os.Getuid(), os.Getgid(), info.PgData)
+			_, err = user_file.WriteString(user)
 			if err != nil {
 				log.Error(err, "failed to write to %s", user_file.Name())
 				return cmd
 			}
+			log.Info("wrote wrapped passwd file", "content", user)
 
-			group_file, err := os.CreateTemp("", "nss_wrapper_group")
+			group_file, err := os.CreateTemp("/run", "nss_wrapper_group")
 			if err != nil {
 				log.Error(err, "failed to create tempfile")
 				return cmd
 			}
 
-			_, err = group_file.WriteString(fmt.Sprintf("postgres:x:%d:\n", os.Getgid()))
+			group := fmt.Sprintf("postgres:x:%d:\n", os.Getgid())
+			_, err = group_file.WriteString(group)
 			if err != nil {
 				log.Error(err, "failed to write to %s", group_file.Name())
 				return cmd
 			}
+			log.Info("wrote wrapped group file", "content", group)
+
+			log.Info("user's path", "path", os.Getenv("PATH"))
 
 			// Use the first location that libnss_wrapper.so was found in
 			cmd.Env = append(cmd.Env, fmt.Sprintf("LD_PRELOAD=%s", matches[0]))
@@ -566,9 +573,10 @@ func (info InitInfo) initdbSyncOnly(ctx context.Context) error {
 		"-D",
 		info.PgData,
 		"--sync-only",
+		"--debug",
 	}
 	contextLogger.Info("Running initdb --sync-only", "pgdata", info.PgData)
-	initdbCmd := createCommandWithNssWrapper(options)
+	initdbCmd := info.createCommandWithNssWrapper(options)
 	if err := execlog.RunBuffering(initdbCmd, constants.InitdbName); err != nil {
 		return fmt.Errorf("error while running initdb --sync-only: %w", err)
 	}
